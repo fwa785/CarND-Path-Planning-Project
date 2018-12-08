@@ -19,6 +19,10 @@ using json = nlohmann::json;
 #define MAX_V       (49.5)  // maximum speed in mph
 #define DELTA_T     (0.02)  // 20 ms
 #define LANE_WIDTH  (4)       // 4 meters per lane
+#define NUM_LANES   (3)
+#define MID_LANE    (1)
+#define PASS_DIST   (10)    // The distance between the car behind to pass
+
 
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
@@ -151,7 +155,7 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 {
 	int prev_wp = -1;
 
-	while(s > maps_s[prev_wp+1] && (prev_wp < (int)(maps_s.size()-1) ))
+	while((prev_wp < (int)(maps_s.size() - 1)) && (s > maps_s[prev_wp+1]))
 	{
 		prev_wp++;
 	}
@@ -211,14 +215,14 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-  int     lane = 1;
+  int     cur_lane = 1;
   double  ref_v = 0;
 
 #ifdef UWS_VCPKG
-  h.onMessage([&ref_v, &lane, &map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<uWS::SERVER> *ws, char *data, size_t length,
+  h.onMessage([&ref_v, &cur_lane, &map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<uWS::SERVER> *ws, char *data, size_t length,
     uWS::OpCode opCode) {
 #else
-  h.onMessage([&ref_v, &lane, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&ref_v, &cur_lane, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
 #endif
     // "42" at the start of the message means there's a websocket message event.
@@ -266,23 +270,27 @@ int main() {
             car_s = end_path_s;
           }
 
-          bool car_ahead = false;
+          bool car_ahead[NUM_LANES] = { false };
           for (int i = 0; i < sensor_fusion.size(); i++) {
             // get the car's lane
             double d = sensor_fusion[i][6];
-            int    l = d2lane(d);
+            int    lane = d2lane(d);
 
-            // If one the same lane
-            if (l == lane) {
-              double vx = sensor_fusion[i][3]; // velocity on x
-              double vy = sensor_fusion[i][4]; // velocity on y
-              double v  = sqrt(vx * vx + vy * vy); // total velocity
-              double s = sensor_fusion[i][5]; // s in Frenet
+            double vx = sensor_fusion[i][3]; // velocity on x
+            double vy = sensor_fusion[i][4]; // velocity on y
+            double v = sqrt(vx * vx + vy * vy); // total velocity
+            double s = sensor_fusion[i][5]; // s in Frenet
 
-              // predict where this car will be after prev_size steps
-              s += v * DELTA_T * prev_size; 
-              if ( ( s > car_s ) && (s - car_s) < 30 ) {
-                car_ahead = true;
+            // predict where this car will be after prev_size steps
+            s += v * DELTA_T * prev_size;
+            if (lane == cur_lane) {
+              if ((s > car_s) && (s - car_s) < 30) {
+                car_ahead[lane] = true;
+              }
+            }
+            else {
+              if (((s + PASS_DIST) > car_s) && (s - car_s) < 30) {
+                car_ahead[lane] = true;
               }
             }
           }
@@ -325,7 +333,19 @@ int main() {
           // fitting of the planned path
           for (int i = 1; i <= 3; i++) {
             double next_s = car_s + 30 * i;
-            double next_d = lane2d(lane);
+            double next_d = lane2d(cur_lane);
+
+            if (car_ahead[cur_lane]) {
+              if ( (cur_lane > 0) && !car_ahead[cur_lane - 1] ) {
+                cur_lane = cur_lane - 1;
+              }
+              else if ((cur_lane < NUM_LANES - 1) && !car_ahead[cur_lane + 1]) {
+                cur_lane = cur_lane + 1;
+              }
+            }
+            else if (!car_ahead[MID_LANE] && cur_lane != MID_LANE) {
+              cur_lane = MID_LANE;
+            }
 
             vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
 
@@ -359,12 +379,12 @@ int main() {
           double target_x = 30;
           double target_y = s(target_x);
           double target_dist = sqrt(target_x * target_x + target_y * target_y);
-          double acc = 0.1;
+          double acc = 0.15;
 
           // Now generate the points on the planned path
           for (int i = 0; i < 50 - prev_size; i++)
           {
-            if (car_ahead) {
+            if (car_ahead[cur_lane]) {
               ref_v -= acc;
               ref_v = (ref_v < MIN_V) ? MIN_V : ref_v;
             }
