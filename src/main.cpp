@@ -254,10 +254,7 @@ int main() {
           vector<double> ptsx;
           vector<double> ptsy;
 
-          vector<double> spline_ptsx;
-          vector<double> spline_ptsy;
-
-          int path_size = previous_path_x.size();
+          int prev_size = previous_path_x.size();
 
           double px;
           double py;
@@ -265,7 +262,7 @@ int main() {
           double px_prev;
           double py_prev;
 
-          if (path_size < 2)
+          if (prev_size < 2)
           {
             px = car_x;
             py = car_y;
@@ -275,11 +272,11 @@ int main() {
             py_prev = py - sin(psi);
           }
           else {
-            px = previous_path_x[path_size - 1];
-            py = previous_path_y[path_size - 1];
+            px = previous_path_x[prev_size - 1];
+            py = previous_path_y[prev_size - 1];
 
-            px_prev = previous_path_x[path_size - 2];
-            py_prev = previous_path_y[path_size - 2];
+            px_prev = previous_path_x[prev_size - 2];
+            py_prev = previous_path_y[prev_size - 2];
             psi = atan2(py - py_prev, px - px_prev);
 
           }
@@ -309,12 +306,17 @@ int main() {
             double x_diff = ptsx[i] - px;
             double y_diff = ptsy[i] - py;
 
-            spline_ptsx.push_back(x_diff * cos(-psi) - y_diff * sin(-psi));
-            spline_ptsy.push_back(y_diff * cos(-psi) + x_diff * sin(-psi));
+            ptsx[i] = x_diff * cos(-psi) - y_diff * sin(-psi);
+            ptsy[i] = y_diff * cos(-psi) + x_diff * sin(-psi);
           }
 
           tk::spline s;
-          s.set_points(spline_ptsx, spline_ptsy);
+          s.set_points(ptsx, ptsy);
+
+          for (int i = 0; i < prev_size; i++) {
+            next_x_vals.push_back(previous_path_x[i]);
+            next_y_vals.push_back(previous_path_y[i]);
+          }
 
           double target_x = 30;
           double target_y = s(target_x);
@@ -322,12 +324,10 @@ int main() {
           double N = target_dist / (ref_v * 0.02 / 2.24);
 
           // Now generate the points on the planned path
-          for (int i = 0; i < 50; i++)
+          for (int i = 0; i < 50 - prev_size; i++)
           {
-            double diff_x = target_x / N * i;
+            double diff_x = target_x / N * (i + 1);
             double diff_y = s(diff_x);
-
-            cout << diff_x << "," << diff_y << endl;
 
             // convert the x, y from car's coordinate back to the map's cooridnate
             double next_x = px + diff_x * cos(psi) - diff_y * sin(psi);
@@ -335,7 +335,6 @@ int main() {
 
             next_x_vals.push_back(next_x);
             next_y_vals.push_back(next_y);
-
           }
 
           msgJson["next_x"] = next_x_vals;
