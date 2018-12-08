@@ -15,10 +15,16 @@ using namespace std;
 // for convenience
 using json = nlohmann::json;
 
+#define MAX_V     (49.5)  // 49.5 mph
+#define DELTA_T   (0.02)  // 20 ms
+
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
+// MPH to Meter per second conversion
+double mph2mps(double x) { return (x / 2.24);  }
+double mps2mph(double x) { return (x * 2.24); }
 
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
@@ -202,7 +208,7 @@ int main() {
   }
 
   int     lane = 1;
-  double  ref_v = 49.5;
+  double  ref_v = 0;
 
 #ifdef UWS_VCPKG
   h.onMessage([&ref_v, &lane, &map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<uWS::SERVER> *ws, char *data, size_t length,
@@ -291,7 +297,7 @@ int main() {
           // fitting of the planned path
           for (int i = 1; i <= 3; i++) {
             double next_s = car_s + 30 * i;
-            double next_d = 6;
+            double next_d = lane * 4 + 2;
 
             vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
 
@@ -313,6 +319,7 @@ int main() {
           tk::spline s;
           s.set_points(ptsx, ptsy);
 
+          // use the left over points in the previous path 
           for (int i = 0; i < prev_size; i++) {
             next_x_vals.push_back(previous_path_x[i]);
             next_y_vals.push_back(previous_path_y[i]);
@@ -321,11 +328,16 @@ int main() {
           double target_x = 30;
           double target_y = s(target_x);
           double target_dist = sqrt(target_x * target_x + target_y * target_y);
-          double N = target_dist / (ref_v * 0.02 / 2.24);
+          double acc = 0.1;
 
           // Now generate the points on the planned path
           for (int i = 0; i < 50 - prev_size; i++)
           {
+            double v = mph2mps(ref_v);
+            ref_v += acc;
+            ref_v = (ref_v > MAX_V) ? MAX_V : ref_v;
+
+            double N = target_dist / (mph2mps(ref_v) * DELTA_T);
             double diff_x = target_x / N * (i + 1);
             double diff_y = s(diff_x);
 
