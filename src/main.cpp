@@ -15,16 +15,20 @@ using namespace std;
 // for convenience
 using json = nlohmann::json;
 
-#define MAX_V     (49.5)  // 49.5 mph
-#define DELTA_T   (0.02)  // 20 ms
+#define MIN_V       (0)     // minimum speed in mph
+#define MAX_V       (49.5)  // maximum speed in mph
+#define DELTA_T     (0.02)  // 20 ms
+#define LANE_WIDTH  (4)       // 4 meters per lane
 
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
 // MPH to Meter per second conversion
-double mph2mps(double x) { return (x / 2.24);  }
+double mph2mps(double x) { return (x / 2.24); }
 double mps2mph(double x) { return (x * 2.24); }
+int    d2lane(double d) { return int(d / LANE_WIDTH); }
+double lane2d(int lane) { return LANE_WIDTH / 2.0 + lane * LANE_WIDTH; }
 
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
@@ -254,13 +258,34 @@ int main() {
 
           json msgJson;
 
-          vector<double> next_x_vals;
-          vector<double> next_y_vals;
-
-          vector<double> ptsx;
-          vector<double> ptsy;
-
           int prev_size = previous_path_x.size();
+
+          // adjust the car's s to the previous path's end s, because the
+          // collision is calculated based on prev_size steps
+          if (prev_size > 0) {
+            car_s = end_path_s;
+          }
+
+          bool car_ahead = false;
+          for (int i = 0; i < sensor_fusion.size(); i++) {
+            // get the car's lane
+            double d = sensor_fusion[i][6];
+            int    l = d2lane(d);
+
+            // If one the same lane
+            if (l == lane) {
+              double vx = sensor_fusion[i][3]; // velocity on x
+              double vy = sensor_fusion[i][4]; // velocity on y
+              double v  = sqrt(vx * vx + vy * vy); // total velocity
+              double s = sensor_fusion[i][5]; // s in Frenet
+
+              // predict where this car will be after prev_size steps
+              s += v * DELTA_T * prev_size; 
+              if ( ( s > car_s ) && (s - car_s) < 30 ) {
+                car_ahead = true;
+              }
+            }
+          }
 
           double px;
           double py;
@@ -287,6 +312,9 @@ int main() {
 
           }
 
+          vector<double> ptsx;
+          vector<double> ptsy;
+
           ptsx.push_back(px_prev);
           ptsy.push_back(py_prev);
 
@@ -297,7 +325,7 @@ int main() {
           // fitting of the planned path
           for (int i = 1; i <= 3; i++) {
             double next_s = car_s + 30 * i;
-            double next_d = lane * 4 + 2;
+            double next_d = lane2d(lane);
 
             vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
 
@@ -319,6 +347,9 @@ int main() {
           tk::spline s;
           s.set_points(ptsx, ptsy);
 
+          vector<double> next_x_vals;
+          vector<double> next_y_vals;
+
           // use the left over points in the previous path 
           for (int i = 0; i < prev_size; i++) {
             next_x_vals.push_back(previous_path_x[i]);
@@ -333,9 +364,14 @@ int main() {
           // Now generate the points on the planned path
           for (int i = 0; i < 50 - prev_size; i++)
           {
-            double v = mph2mps(ref_v);
-            ref_v += acc;
-            ref_v = (ref_v > MAX_V) ? MAX_V : ref_v;
+            if (car_ahead) {
+              ref_v -= acc;
+              ref_v = (ref_v < MIN_V) ? MIN_V : ref_v;
+            }
+            else {
+              ref_v += acc;
+              ref_v = (ref_v > MAX_V) ? MAX_V : ref_v;
+            }
 
             double N = target_dist / (mph2mps(ref_v) * DELTA_T);
             double diff_x = target_x / N * (i + 1);
