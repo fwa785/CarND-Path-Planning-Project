@@ -224,7 +224,7 @@ int main() {
   h.onMessage([&stay_on_lane, &ref_v, &cur_lane, &map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<uWS::SERVER> *ws, char *data, size_t length,
     uWS::OpCode opCode) {
 #else
-  h.onMessage([&ref_v, &cur_lane, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&stay_on_lane, &ref_v, &cur_lane, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
 #endif
     // "42" at the start of the message means there's a websocket message event.
