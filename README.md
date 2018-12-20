@@ -1,20 +1,254 @@
 # CarND-Path-Planning-Project
 Self-Driving Car Engineer Nanodegree Program
    
-### Simulator.
-You can download the Term3 Simulator which contains the Path Planning Project from the [releases tab (https://github.com/udacity/self-driving-car-sim/releases/tag/T3_v1.2).
+## Introduction
+This project implemented a path planning algorithm for a car driving on highway. 
+It controls the speed, acceleration and the jerk within the limit. It also detects other vehicles, 
+and makes decision to accelerate, decelerate, and change lanes based on other vehicles's location and speed.
+The car tries to go as close as possible to the 50 MPH speed limit. It can finish one loop with any incidence
+within around 5 minutes 30 seconds depending on the traffic.
 
-### Goals
-In this project your goal is to safely navigate around a virtual highway with other traffic that is driving +-10 MPH of the 50 MPH speed limit. You will be provided the car's localization and sensor fusion data, there is also a sparse map list of waypoints around the highway. The car should try to go as close as possible to the 50 MPH speed limit, which means passing slower traffic when possible, note that other cars will try to change lanes too. The car should avoid hitting other cars at all cost as well as driving inside of the marked road lanes at all times, unless going from one lane to another. The car should be able to make one complete loop around the 6946m highway. Since the car is trying to go 50 MPH, it should take a little over 5 minutes to complete 1 loop. Also the car should not experience total acceleration over 10 m/s^2 and jerk that is greater than 10 m/s^3.
+The source code can be downloaded from [here](https://github.com/fwa785/CarND-Path-Planning-Project).
 
-#### The map of the highway is in data/highway_map.txt
-Each waypoint in the list contains  [x,y,s,dx,dy] values. x and y are the waypoint's map coordinate position, the s value is the distance along the road to get to that waypoint in meters, the dx and dy values define the unit normal vector pointing outward of the highway loop.
+## Model
 
-The highway's waypoints loop around so the frenet s value, distance along the road, goes from 0 to 6945.554.
+### Detection of other vehicles
+The sensor fusion data provides information about the other cars. The first step of the algorithm is to find the
+cars ahead and behind the vehicle. The distance and the speed of the cars ahead and behind this vehicle on all lanes
+are recorded. 
 
-## Basic Build Instructions
+          double car_ahead_s_delta[NUM_LANES] = { 1000, 1000, 1000 };
+          double car_behind_s_delta[NUM_LANES] = { 1000, 1000, 1000 };
+          double car_ahead_v[NUM_LANES] = { MAX_V, MAX_V, MAX_V };
+          double car_behind_v[NUM_LANES] = { MIN_V, MIN_V, MIN_V };
 
-1. Clone this repo.
+          for (int i = 0; i < sensor_fusion.size(); i++) {
+            // get the car's lane
+            double d = sensor_fusion[i][6];
+            int    lane = d2lane(d);
+
+            double vx = sensor_fusion[i][3]; // velocity on x
+            double vy = sensor_fusion[i][4]; // velocity on y
+            double v = sqrt(vx * vx + vy * vy); // total velocity
+            double s = sensor_fusion[i][5]; // s in Frenet
+
+            // predict where this car will be after prev_size steps
+            s += v * DELTA_T * prev_size;
+
+            // Detect the car right in front of this car
+            if ((s > car_s) && ((s - car_s) < car_ahead_s_delta[lane])) {
+              car_ahead_s_delta[lane] = s - car_s;
+              car_ahead_v[lane] = v;
+            }
+
+            // Detect the car right after this car
+            if ((s < car_s) && ((car_s - s) < car_behind_s_delta[lane])) {
+              car_behind_s_delta[lane] = car_s - s;
+              car_behind_v[lane] = v;
+            }
+          }
+
+### Select the target lane
+In addition, the car with the highest velocity among all the lanes is detected, and the lane is set as
+the target lane for this vehicle to change to. However, if the speed of the car ahead on another lane is 
+slower than the car ahead on the current lane, but the car on the other lane is far more ahead than this car
+on the current lane, we also choose the other lane as the target lane to change. The reason is the car on the
+other lane is far, so we can change to the other lane temporarily and then have enough space to switch back to 
+the current lane to bypass the slow car in front of us. Sometimes the target lane is 2 lanes away, then the target lane is 
+adjusted to be the next lane can help to get to the target.
+
+          /* Find out the target lane to change, target lane maybe two lanes away */
+          int target_lane = cur_lane;
+          if (car_ahead_s_delta[cur_lane] < (TRAILING_DIST * 3)) {
+            int max_v = car_ahead_v[cur_lane];
+            //int start_lane = rand() % NUM_LANES;
+            int start_lane = 0;
+            for (int i = 0; i < NUM_LANES; i++) {
+              int check_lane = (start_lane + i) % NUM_LANES;
+              if ( (car_ahead_s_delta[check_lane] > (car_ahead_s_delta[cur_lane] + TRAILING_DIST * 2)) ||
+                   (car_ahead_v[check_lane] > max_v) )
+              {
+                max_v = car_ahead_v[check_lane];
+                target_lane = check_lane;
+              }
+            }
+          }
+  
+          if (target_lane > cur_lane) {
+            target_lane = cur_lane + 1;
+          }
+          else if (target_lane < cur_lane) {
+            target_lane = cur_lane - 1;
+          }
+
+
+### Plan the path
+
+First the algorithm takes the last two points from the previous planned path. This way, we can make sure the path of
+the car is continous from the previous planned path. The heading angle of the car is also calculated from the previous
+path.
+
+          if (prev_size < 2)
+          {
+            px = car_x;
+            py = car_y;
+            psi = deg2rad(car_yaw);
+
+            px_prev = px - cos(psi);
+            py_prev = py - sin(psi);
+          }
+          else {
+            px = previous_path_x[prev_size - 1];
+            py = previous_path_y[prev_size - 1];
+
+            px_prev = previous_path_x[prev_size - 2];
+            py_prev = previous_path_y[prev_size - 2];
+            psi = atan2(py - py_prev, px - px_prev);
+          }
+
+          ptsx.push_back(px_prev);
+          ptsy.push_back(py_prev);
+
+          ptsx.push_back(px);
+          ptsy.push_back(py);
+
+
+Then 3 path positions are planed on the Frenet coordinate with s of the points on the coordinate aparted by 30 meters.
+While generating the 3 path positions, we also decide whether we change lanes starting from the second position. If the
+target lane chosen is different than the current lane, and there are enough space before and after my car, we can change
+the lane, and plan the second and third positions on the new lane. In order to prevent too frequent lane changes, I intrdouced
+a variable stay_on_lane to count the number of cycles the vehicle stay on the current lane. It can only change to a different 
+lane after staying on this lane for certain extended period.
+
+          // generate 3 positions on Frenet coordinate for smooth 
+          // fitting of the planned path
+          for (int i = 1; i <= 3; i++) {
+
+            double next_s = car_s + 30 * i;
+            double next_d = lane2d(cur_lane);
+
+            vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+
+            ptsx.push_back(xy[0]);
+            ptsy.push_back(xy[1]);
+
+            /* change lane */
+            if (i == 1) {
+              stay_on_lane++;
+
+              if ( (stay_on_lane > 100) &&
+                   (target_lane != cur_lane) )
+              {
+                if ((car_ahead_s_delta[target_lane] >= TRAILING_DIST) &&
+                    (car_behind_s_delta[target_lane] >= BYPASS_DIST))
+                {
+                  cur_lane = target_lane;
+                  stay_on_lane = 0;
+                }
+              }
+            }
+          }
+
+### Generate smooth path
+With the 5 points we generated, we can use the spline library to help us generate smooth and continues path along these
+5 points.
+
+To do that, we first need to convert the coordinate from the map coordinate to the car's coordinate. The reason is, on the
+car's coordinate, the car is aheading to the X axis, and x always increases. The spline library can only fit a curve with
+incremental x. Another reason to choose car's coordiante is later on, when we generate more path points from the spline function,
+we can have a better control of x variable. Since x axis is the direction the car's driving, we can generate x based on the car's
+velocity and the time interval(0.02s), and then use the x value to generate the y value based on the spline fitting.
+
+          // Now convert the points from map coordinate to the car's coordinate
+          // because it's easier to generate middle points on the car's coordinate
+          // with controlled speed
+          for (int i = 0; i < ptsx.size(); i++) {
+            double x_diff = ptsx[i] - px;
+            double y_diff = ptsy[i] - py;
+
+            ptsx[i] = x_diff * cos(-psi) - y_diff * sin(-psi);
+            ptsy[i] = y_diff * cos(-psi) + x_diff * sin(-psi);
+          }
+
+          tk::spline s;
+          s.set_points(ptsx, ptsy);
+
+### Generate the points on the planned path
+Finally we can generate the points on the planned path. 
+
+First, we add the points not used by the previous path to this path to guarantee a continous path from previous path.
+
+          // use the left over points in the previous path 
+          for (int i = 0; i < prev_size; i++) {
+            next_x_vals.push_back(previous_path_x[i]);
+            next_y_vals.push_back(previous_path_y[i]);
+          }
+
+Second, we generate the points from the spline fitting. We will generate the points on each segments of 30 meters apart on
+car's coordiante's x axis. With the target x and y value, we can caculate the target distance for each segment.
+
+          double target_x = 30;
+          double target_y = s(target_x);
+          double target_dist = sqrt(target_x * target_x + target_y * target_y);
+
+The target distance can be useful to caculate the x axis difference on each 0.02 second interval based on the current velocit 
+of the vehicle. With that, the difference of y can be caculated, and the point is converted back to the map coordiante for
+the simulator to use as the points on the next path.
+
+            double N = target_dist / (mph2mps(ref_v) * DELTA_T);            
+            diff_x += target_x / N;
+            double diff_y = s(diff_x);
+            // convert the x, y from car's coordinate back to the map's cooridnate
+            double next_x = px + diff_x * cos(psi) - diff_y * sin(psi);
+            double next_y = py + diff_x * sin(psi) + diff_y * cos(psi);
+
+            next_x_vals.push_back(next_x);
+            next_y_vals.push_back(next_y);
+			
+
+After each point is generated, we need to check how to accelerate or decelerate the vehicle. 
+
+We first update the distance of the cars ahead of us on the target lane the current lane, based on their velocity and
+our velocity. If both the cars on the current lane and the target lane has enough has enough distance ahead of us, we
+can accelerate to catch up. However, if the car on the target lane doesn't have enough distance ahead of us, and it's
+even smaller than the distance we can bypass it, then we also accelerate to try to run ahead of it to bypass it.
+
+            /* match the speed to the target lane */
+            if ( ((car_ahead_s_delta[target_lane] > TRAILING_DIST) ||
+                   (car_ahead_s_delta[target_lane] < BYPASS_DIST)) &&
+                 (car_ahead_s_delta[cur_lane] > TRAILING_DIST) )
+            {
+              ref_v += acc;
+            }
+
+If the car can't accelerate, check whether it needs to decelerate to match the speed on the target lane in order to change
+lane. But it can't decelerate to be even slower than the car right behind us. 
+
+            else {
+              if (ref_v - dec > car_behind_v[target_lane]) {
+                ref_v -= dec;
+              }
+              else {
+                ref_v = car_behind_v[target_lane];
+              }
+
+			  /* Has to at least faster than the car behind use */
+              if (car_behind_s_delta[cur_lane] < BYPASS_DIST) {
+                if (ref_v < car_behind_v[cur_lane]) {
+                  ref_v = car_behind_v[cur_lane];
+                }
+              }
+            }
+
+## Result
+With the path planning algorithm described above, the vehicle can at least drive along the highway with one loop at the speed as close to
+50MPH as possible without any incidence.
+			
+[![IMAGE Final Result](https://img.youtube.com/vi/XJq7NK-AkQo/0.jpg)](https://www.youtube.com/watch?v=XJq7NK-AkQo)
+			
+## Build Instructions
+
+1. Clone the repo.
 2. Make a build directory: `mkdir build && cd build`
 3. Compile: `cmake .. && make`
 4. Run it: `./path_planning`.

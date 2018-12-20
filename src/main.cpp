@@ -15,13 +15,14 @@ using namespace std;
 // for convenience
 using json = nlohmann::json;
 
-#define MIN_V       (0)     // minimum speed in mph
-#define MAX_V       (49.5)  // maximum speed in mph
-#define DELTA_T     (0.02)  // 20 ms
-#define LANE_WIDTH  (4)       // 4 meters per lane
-#define NUM_LANES   (3)
-#define MID_LANE    (1)
-#define PASS_DIST   (10)    // The distance between the car behind to pass
+#define MIN_V           (0.2)  // minimum speed in mph
+#define MAX_V           (49.5)  // maximum speed in mph
+#define DELTA_T         (0.02)  // 20 ms
+#define LANE_WIDTH      (4)     // 4 meters per lane
+#define NUM_LANES       (3)
+#define MID_LANE        (1)
+#define BYPASS_DIST     (15)    // The distance between the cars to bypass
+#define TRAILING_DIST   (30)
 
 
 // For converting back and forth between radians and degrees.
@@ -216,10 +217,11 @@ int main() {
   }
 
   int     cur_lane = 1;
-  double  ref_v = 0;
+  double  ref_v = MIN_V;
+  int     stay_on_lane = 0;
 
 #ifdef UWS_VCPKG
-  h.onMessage([&ref_v, &cur_lane, &map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<uWS::SERVER> *ws, char *data, size_t length,
+  h.onMessage([&stay_on_lane, &ref_v, &cur_lane, &map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<uWS::SERVER> *ws, char *data, size_t length,
     uWS::OpCode opCode) {
 #else
   h.onMessage([&ref_v, &cur_lane, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
@@ -270,7 +272,14 @@ int main() {
             car_s = end_path_s;
           }
 
-          bool car_ahead[NUM_LANES] = { false };
+          /* Go through every car, and find out the distance from cars ahead it and 
+           * behind it on each lane 
+           */
+          double car_ahead_s_delta[NUM_LANES] = { 1000, 1000, 1000 };
+          double car_behind_s_delta[NUM_LANES] = { 1000, 1000, 1000 };
+          double car_ahead_v[NUM_LANES] = { MAX_V, MAX_V, MAX_V };
+          double car_behind_v[NUM_LANES] = { MIN_V, MIN_V, MIN_V };
+
           for (int i = 0; i < sensor_fusion.size(); i++) {
             // get the car's lane
             double d = sensor_fusion[i][6];
@@ -283,16 +292,47 @@ int main() {
 
             // predict where this car will be after prev_size steps
             s += v * DELTA_T * prev_size;
-            if (lane == cur_lane) {
-              if ((s > car_s) && (s - car_s) < 30) {
-                car_ahead[lane] = true;
+
+            // Detect the car right in front of this car
+            if ((s > car_s) && ((s - car_s) < car_ahead_s_delta[lane])) {
+              car_ahead_s_delta[lane] = s - car_s;
+              car_ahead_v[lane] = v;
+            }
+
+            // Detect the car right after this car
+            if ((s < car_s) && ((car_s - s) < car_behind_s_delta[lane])) {
+              car_behind_s_delta[lane] = car_s - s;
+              car_behind_v[lane] = v;
+            }
+          }
+
+          /* Find out the target lane to change, target lane maybe two lanes away */
+          int target_lane = cur_lane;
+          /* Start change lane decision when the car in front is 30x3 meters away */
+          if (car_ahead_s_delta[cur_lane] < (TRAILING_DIST * 3)) {
+            int max_v = car_ahead_v[cur_lane];
+            //int start_lane = rand() % NUM_LANES;
+            int start_lane = 0;
+            for (int i = 0; i < NUM_LANES; i++) {
+              int check_lane = (start_lane + i) % NUM_LANES;
+              /* If the car's velocity is the maximum or the car is pretty far  
+               * way ahead(30x2 meters) comparing with the car ahead on the current lane,
+               * we will set it as the target lane
+               */
+              if ( (car_ahead_s_delta[check_lane] > (car_ahead_s_delta[cur_lane] + TRAILING_DIST * 2)) ||
+                   (car_ahead_v[check_lane] > max_v) )
+              {
+                max_v = car_ahead_v[check_lane];
+                target_lane = check_lane;
               }
             }
-            else {
-              if (((s + PASS_DIST) > car_s) && (s - car_s) < 30) {
-                car_ahead[lane] = true;
-              }
-            }
+          }
+  
+          if (target_lane > cur_lane) {
+            target_lane = cur_lane + 1;
+          }
+          else if (target_lane < cur_lane) {
+            target_lane = cur_lane - 1;
           }
 
           double px;
@@ -300,6 +340,9 @@ int main() {
           double psi;
           double px_prev;
           double py_prev;
+          vector<double> ptsx;
+          vector<double> ptsy;
+
 
           if (prev_size < 2)
           {
@@ -317,11 +360,7 @@ int main() {
             px_prev = previous_path_x[prev_size - 2];
             py_prev = previous_path_y[prev_size - 2];
             psi = atan2(py - py_prev, px - px_prev);
-
           }
-
-          vector<double> ptsx;
-          vector<double> ptsy;
 
           ptsx.push_back(px_prev);
           ptsy.push_back(py_prev);
@@ -332,25 +371,30 @@ int main() {
           // generate 3 positions on Frenet coordinate for smooth 
           // fitting of the planned path
           for (int i = 1; i <= 3; i++) {
+
             double next_s = car_s + 30 * i;
             double next_d = lane2d(cur_lane);
-
-            if (car_ahead[cur_lane]) {
-              if ( (cur_lane > 0) && !car_ahead[cur_lane - 1] ) {
-                cur_lane = cur_lane - 1;
-              }
-              else if ((cur_lane < NUM_LANES - 1) && !car_ahead[cur_lane + 1]) {
-                cur_lane = cur_lane + 1;
-              }
-            }
-            else if (!car_ahead[MID_LANE] && cur_lane != MID_LANE) {
-              cur_lane = MID_LANE;
-            }
 
             vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
 
             ptsx.push_back(xy[0]);
             ptsy.push_back(xy[1]);
+
+            /* change lane */
+            if (i == 1) {
+              stay_on_lane++;
+
+              if ( (stay_on_lane > 100) &&
+                   (target_lane != cur_lane) )
+              {
+                if ((car_ahead_s_delta[target_lane] >= TRAILING_DIST) &&
+                    (car_behind_s_delta[target_lane] >= BYPASS_DIST))
+                {
+                  cur_lane = target_lane;
+                  stay_on_lane = 0;
+                }
+              }
+            }
           }
 
           // Now convert the points from map coordinate to the car's coordinate
@@ -379,30 +423,59 @@ int main() {
           double target_x = 30;
           double target_y = s(target_x);
           double target_dist = sqrt(target_x * target_x + target_y * target_y);
-          double acc = 0.15;
+          double acc = 0.15; // acceleration
+          double dec = 0.18; // deceleration
+
+          double diff_x = 0;
 
           // Now generate the points on the planned path
           for (int i = 0; i < 50 - prev_size; i++)
           {
-            if (car_ahead[cur_lane]) {
-              ref_v -= acc;
-              ref_v = (ref_v < MIN_V) ? MIN_V : ref_v;
-            }
-            else {
-              ref_v += acc;
-              ref_v = (ref_v > MAX_V) ? MAX_V : ref_v;
-            }
-
             double N = target_dist / (mph2mps(ref_v) * DELTA_T);
-            double diff_x = target_x / N * (i + 1);
+            
+            diff_x += target_x / N;
             double diff_y = s(diff_x);
-
             // convert the x, y from car's coordinate back to the map's cooridnate
             double next_x = px + diff_x * cos(psi) - diff_y * sin(psi);
             double next_y = py + diff_x * sin(psi) + diff_y * cos(psi);
 
             next_x_vals.push_back(next_x);
             next_y_vals.push_back(next_y);
+
+            /* update the car_ahead_s_delta for each delta_t */
+            car_ahead_s_delta[target_lane] += mph2mps(car_ahead_v[target_lane] - ref_v) * DELTA_T;
+            car_ahead_s_delta[cur_lane] += mph2mps(car_ahead_v[cur_lane] - ref_v) * DELTA_T;
+
+            /* match the speed to the target lane */
+            if ( ((car_ahead_s_delta[target_lane] > TRAILING_DIST) ||
+                   (car_ahead_s_delta[target_lane] < BYPASS_DIST)) &&
+                 (car_ahead_s_delta[cur_lane] > TRAILING_DIST) )
+            {
+              ref_v += acc;
+            }
+            else {
+              if (ref_v - dec > car_behind_v[target_lane]) {
+                ref_v -= dec;
+              }
+              else {
+                ref_v = car_behind_v[target_lane];
+              }
+
+              /* Has to at least faster than the car behind use */
+              if (car_behind_s_delta[cur_lane] < BYPASS_DIST) {
+                if (ref_v < car_behind_v[cur_lane]) {
+                  ref_v = car_behind_v[cur_lane];
+                }
+              }
+            }
+
+            if (ref_v > MAX_V) {
+              ref_v = MAX_V;
+            }
+
+            if (ref_v < MIN_V) {
+              ref_v = MIN_V;
+            }
           }
 
           msgJson["next_x"] = next_x_vals;
